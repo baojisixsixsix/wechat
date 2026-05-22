@@ -1,0 +1,30 @@
+<view class="game-page">
+  <view class="scorebar">
+    <view class="score-item">
+      <text class="score-label">左手</text>
+      <text class="score-value">{{leftCount}}</text>
+    </view>
+    <view class="score-title">左右开弓</view>
+    <view class="score-item">
+      <text class="score-label">右手</text>
+      <text class="score-value">{{rightCount}}</text>
+    </view>
+  </view>
+
+  <view class="arena {{shakeClass}}">
+    <image class="face" src="{{faceSrc}}" mode="aspectFit" />
+    <image wx:if="{{handVisible}}" class="hand {{handClass}}" src="{{handSrc}}" mode="aspectFit" />
+    <view wx:if="{{impactVisible}}" class="impact {{impactClass}}"></view>
+  </view>
+
+  <view class="prompt">{{message}}</view>
+
+  <view class="controls">
+    <button class="key-button" hover-class="key-button-active" bindtap="hitLeft" aria-label="left hand slap">
+      <image class="key-icon" src="/assets/optimized/key-left.jpg" mode="aspectFit" />
+    </button>
+    <button class="key-button" hover-class="key-button-active" bindtap="hitRight" aria-label="right hand slap">
+      <image class="key-icon" src="/assets/optimized/key-right.jpg" mode="aspectFit" />
+    </button>
+  </view>
+</view>
