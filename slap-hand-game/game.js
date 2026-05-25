@@ -14,13 +14,16 @@ const ASSETS = {
 const images = {};
 const audio = {
   palm: null,
-  back: null
+  back: null,
+  bgm: null,
+  bgmStarted: false
 };
 
 const state = {
   width: 0,
   height: 0,
   pixelRatio: 1,
+  safeTop: 0,
   loaded: 0,
   total: Object.keys(ASSETS).length,
   face: "faceNormal",
@@ -28,6 +31,10 @@ const state = {
   actionStart: 0,
   leftCount: 0,
   rightCount: 0,
+  energyScore: 0,
+  lastEnergyDirection: null,
+  lastEnergyGain: 0,
+  lastEnergyGainAt: 0,
   message: "点左右方向键，安排他一下",
   leftButton: null,
   rightButton: null,
@@ -35,6 +42,7 @@ const state = {
 };
 
 const ACTION_DURATION = 760;
+const ENERGY_MAX = 333;
 const DEFAULT_IDLE_MESSAGE = "继续点，左右都能打";
 const TAUNT_MESSAGES = [
   "打啊，就没力气了？",
@@ -56,13 +64,27 @@ function getIdleMessage() {
   return TAUNT_MESSAGES[phraseIndex];
 }
 
+function getEnergyGain(direction) {
+  return state.lastEnergyDirection && state.lastEnergyDirection !== direction ? 3 : 1;
+}
+
+function addEnergy(direction) {
+  const gain = getEnergyGain(direction);
+  state.energyScore = Math.min(state.energyScore + gain, ENERGY_MAX);
+  state.lastEnergyDirection = direction;
+  state.lastEnergyGain = gain;
+  state.lastEnergyGainAt = Date.now();
+  return gain;
+}
+
 function getWindowSize() {
   if (wx.getWindowInfo) {
     const info = wx.getWindowInfo();
     return {
       width: info.windowWidth,
       height: info.windowHeight,
-      pixelRatio: info.pixelRatio || 1
+      pixelRatio: info.pixelRatio || 1,
+      safeTop: info.safeArea ? info.safeArea.top : 0
     };
   }
 
@@ -70,7 +92,8 @@ function getWindowSize() {
   return {
     width: info.windowWidth,
     height: info.windowHeight,
-    pixelRatio: info.pixelRatio || 1
+    pixelRatio: info.pixelRatio || 1,
+    safeTop: info.safeArea ? info.safeArea.top : 0
   };
 }
 
@@ -79,6 +102,7 @@ function resizeCanvas() {
   state.width = size.width;
   state.height = size.height;
   state.pixelRatio = size.pixelRatio;
+  state.safeTop = size.safeTop || 0;
   canvas.width = Math.floor(size.width * size.pixelRatio);
   canvas.height = Math.floor(size.height * size.pixelRatio);
   ctx.setTransform(state.pixelRatio, 0, 0, state.pixelRatio, 0, 0);
@@ -109,6 +133,21 @@ function initAudio() {
   audio.back.src = "assets/audio/slap-back.wav";
   audio.back.volume = 0.95;
   audio.back.obeyMuteSwitch = false;
+
+  audio.bgm = wx.createInnerAudioContext();
+  audio.bgm.src = "assets/audio/bgm-slap-game-loop-30s.wav";
+  audio.bgm.loop = true;
+  audio.bgm.volume = 0.42;
+  audio.bgm.obeyMuteSwitch = false;
+}
+
+function startBgm() {
+  if (!audio.bgm || audio.bgmStarted) {
+    return;
+  }
+
+  audio.bgmStarted = true;
+  audio.bgm.play();
 }
 
 function playSlapSound(direction) {
@@ -119,6 +158,14 @@ function playSlapSound(direction) {
 
   sound.stop();
   sound.play();
+}
+
+function vibrateOnSlap() {
+  if (!wx.vibrateShort) {
+    return;
+  }
+
+  wx.vibrateShort({ type: "light" });
 }
 
 function drawRoundRect(x, y, width, height, radius, fillStyle) {
@@ -173,29 +220,189 @@ function drawBackground() {
   ctx.fill();
 }
 
-function drawScores() {
-  const top = 22;
-  const boxW = Math.min(116, state.width * 0.28);
-  const boxH = 46;
+function drawEnergyFlames(centerX, centerY, width, height, now) {
+  const left = centerX - width / 2;
+  const top = centerY - height / 2;
+  const flameCount = 34;
 
-  drawRoundRect(18, top, boxW, boxH, 8, "rgba(17,24,39,0.08)");
-  drawRoundRect(state.width - boxW - 18, top, boxW, boxH, 8, "rgba(17,24,39,0.08)");
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  ctx.shadowColor = "rgba(239,68,68,0.42)";
+  ctx.shadowBlur = 18;
 
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillStyle = "#111827";
-  ctx.font = "700 18px sans-serif";
-  ctx.fillText("左右开弓", state.width / 2, top + boxH / 2);
+  for (let i = 0; i < flameCount; i += 1) {
+    const ratio = i / (flameCount - 1);
+    const x = left + ratio * width;
+    const narrow = width / flameCount;
+    const waveA = Math.sin(now * 0.013 + i * 1.91);
+    const waveB = Math.sin(now * 0.021 + i * 0.77);
+    const lift = 18 + (waveA * 0.5 + 0.5) * 34 + (waveB * 0.5 + 0.5) * 12;
+    const drift = waveB * 9;
+    const baseY = top + height * (0.74 + (i % 3) * 0.08);
+    const tipX = x + drift;
+    const tipY = top - lift;
 
-  ctx.font = "600 13px sans-serif";
-  ctx.fillStyle = "#4b5563";
-  ctx.fillText("左手", 48, top + boxH / 2);
-  ctx.fillText("右手", state.width - boxW + 30, top + boxH / 2);
+    const flameGradient = ctx.createLinearGradient(tipX, tipY, x, baseY);
+    flameGradient.addColorStop(0, "rgba(254,202,202,1)");
+    flameGradient.addColorStop(0.22, "rgba(248,113,113,0.42)");
+    flameGradient.addColorStop(0.58, "rgba(220,38,38,0.74)");
+    flameGradient.addColorStop(1, "rgba(127,29,29,0.58)");
 
-  ctx.font = "800 22px sans-serif";
-  ctx.fillStyle = "#111827";
-  ctx.fillText(String(state.leftCount), 92, top + boxH / 2);
-  ctx.fillText(String(state.rightCount), state.width - 48, top + boxH / 2);
+    ctx.globalAlpha = 0.58 + (i % 4) * 0.06;
+    ctx.beginPath();
+    ctx.moveTo(x - narrow * 0.85, baseY);
+    ctx.bezierCurveTo(
+      x - narrow * 0.3 + drift * 0.2,
+      top + height * 0.22,
+      tipX - narrow * 0.55,
+      tipY + lift * 0.34,
+      tipX,
+      tipY
+    );
+    ctx.bezierCurveTo(
+      tipX + narrow * 0.45,
+      tipY + lift * 0.28,
+      x + narrow * 0.6 + drift * 0.15,
+      top + height * 0.26,
+      x + narrow * 0.95,
+      baseY
+    );
+    ctx.closePath();
+    ctx.fillStyle = flameGradient;
+    ctx.fill();
+  }
+
+  ctx.shadowBlur = 0;
+  ctx.globalCompositeOperation = "source-over";
+  ctx.globalAlpha = 0.24;
+  ctx.strokeStyle = "rgba(75,85,99,0.42)";
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 8; i += 1) {
+    const smokeX = left + ((now * 0.015 + i * 53) % width);
+    const smokeY = top - 10 - (i % 4) * 9;
+    ctx.beginPath();
+    ctx.moveTo(smokeX, smokeY + 14);
+    ctx.quadraticCurveTo(
+      smokeX + Math.sin(now * 0.01 + i) * 14,
+      smokeY,
+      smokeX + Math.cos(now * 0.012 + i) * 22,
+      smokeY - 16
+    );
+    ctx.stroke();
+  }
+
+  ctx.globalAlpha = 0.55;
+  ctx.fillStyle = "rgba(248,113,113,0.72)";
+  for (let i = 0; i < 12; i += 1) {
+    const sparkX = left + ((now * 0.06 + i * 37) % width);
+    const sparkY = top - 4 - ((now * 0.045 + i * 19) % 42);
+    ctx.fillRect(sparkX, sparkY, 1.4, 3.8);
+  }
+  ctx.restore();
+}
+
+function drawEnergyBar(now) {
+  const top = Math.max(54, state.safeTop + 12);
+  const barW = Math.min(326, state.width - 34);
+  const barH = 34;
+  const centerX = state.width / 2;
+  const centerY = top + barH / 2;
+  const fillRatio = Math.min(state.energyScore / ENERGY_MAX, 1);
+  const isFull = state.energyScore >= ENERGY_MAX;
+  const x = centerX - barW / 2;
+  const y = centerY - barH / 2;
+  const fillW = Math.max(0, barW * fillRatio);
+
+  ctx.save();
+  if (isFull) {
+    drawEnergyFlames(centerX, centerY, barW, barH, now);
+  }
+
+  if (fillW <= 0) {
+    ctx.restore();
+    return;
+  }
+
+  ctx.shadowColor = isFull ? "rgba(249,115,22,0.56)" : "rgba(234,179,8,0.36)";
+  ctx.shadowBlur = isFull ? 22 : 14;
+  ctx.shadowOffsetY = 5;
+
+  const bodyGradient = ctx.createLinearGradient(x, y, x, y + barH);
+  bodyGradient.addColorStop(0, "#fffde1");
+  bodyGradient.addColorStop(0.2, "#fef08a");
+  bodyGradient.addColorStop(0.44, "#fde047");
+  bodyGradient.addColorStop(0.68, "#fbbf24");
+  bodyGradient.addColorStop(0.86, "#f59e0b");
+  bodyGradient.addColorStop(1, isFull ? "#f97316" : "#ca8a04");
+  drawRoundRect(x, y, fillW, barH, 17, bodyGradient);
+  ctx.shadowColor = "transparent";
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, y, fillW, barH);
+  ctx.clip();
+
+  const shineGradient = ctx.createLinearGradient(x, y, x, y + barH);
+  shineGradient.addColorStop(0, "rgba(255,255,255,0.92)");
+  shineGradient.addColorStop(0.42, "rgba(255,255,255,0.32)");
+  shineGradient.addColorStop(0.44, "rgba(255,255,255,0)");
+  shineGradient.addColorStop(1, "rgba(255,255,255,0)");
+  drawRoundRect(x + 3, y + 3, Math.max(0, fillW - 6), Math.max(8, barH * 0.34), 8, shineGradient);
+
+  ctx.globalAlpha = isFull ? 0.82 : 0.62;
+  ctx.strokeStyle = isFull ? "rgba(255,255,255,0.76)" : "rgba(255,255,255,0.58)";
+  ctx.lineWidth = 4;
+  const stripeOffset = (now * 0.18) % 26;
+  for (let stripeX = x - barH + stripeOffset; stripeX < x + barW + barH; stripeX += 26) {
+    ctx.beginPath();
+    ctx.moveTo(stripeX, y + barH);
+    ctx.lineTo(stripeX + barH, y);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  ctx.save();
+  ctx.globalAlpha = 0.38 + Math.sin(now * 0.012) * 0.12;
+  ctx.fillStyle = "rgba(255,255,255,0.82)";
+  for (let i = 0; i < 4; i += 1) {
+    const sparkleX = x + 22 + ((now * 0.035 + i * 73) % Math.max(1, barW - 44));
+    const sparkleY = y + 10 + (i % 2) * 12;
+    ctx.beginPath();
+    ctx.arc(sparkleX, sparkleY, 2.2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+
+  ctx.strokeStyle = isFull ? "rgba(255,237,213,0.9)" : "rgba(255,251,235,0.7)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x + 12, y + 2);
+  ctx.lineTo(x + Math.max(12, fillW - 12), y + 2);
+  ctx.stroke();
+  ctx.restore();
+
+  if (state.lastEnergyGain > 0) {
+    const age = now - state.lastEnergyGainAt;
+    if (age < 760) {
+      const progress = age / 760;
+      const popY = centerY - 1 - progress * 24;
+      const scale = 1.08 + Math.sin(progress * Math.PI) * 0.46;
+
+      ctx.save();
+      ctx.globalAlpha = 1 - progress;
+      ctx.translate(centerX, popY);
+      ctx.scale(scale, scale);
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.font = "900 24px sans-serif";
+      ctx.lineWidth = 5;
+      ctx.strokeStyle = state.lastEnergyGain >= 3 ? "rgba(127,29,29,0.82)" : "rgba(120,53,15,0.78)";
+      ctx.fillStyle = state.lastEnergyGain >= 3 ? "#ffedd5" : "#fffbeb";
+      ctx.strokeText(`+${state.lastEnergyGain}`, 0, 0);
+      ctx.fillText(`+${state.lastEnergyGain}`, 0, 0);
+      ctx.restore();
+    }
+  }
 }
 
 function getActionProgress(now) {
@@ -335,7 +542,7 @@ function render() {
   if (state.loaded < state.total) {
     drawLoading();
   } else {
-    drawScores();
+    drawEnergyBar(now);
     const faceBox = drawFace(now);
     drawHand(now, faceBox);
     drawPrompt();
@@ -355,7 +562,9 @@ function pointInRect(point, rect) {
 
 function playSlap(direction, options = {}) {
   const isLeft = direction === "left";
+  startBgm();
   playSlapSound(direction);
+  vibrateOnSlap();
   state.action = direction;
   state.actionStart = Date.now();
   state.face = isLeft ? "faceLeft" : "faceRight";
@@ -365,6 +574,8 @@ function playSlap(direction, options = {}) {
   if (options.countHit === false) {
     return;
   }
+
+  addEnergy(direction);
 
   if (isLeft) {
     state.leftCount += 1;
