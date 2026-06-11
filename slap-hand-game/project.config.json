@@ -30,8 +30,8 @@
     }
   },
   "compileType": "game",
-  "libVersion": "3.7.7",
-  "appid": "wxbea02ecb600f8f94",
+  "libVersion": "3.16.0",
+  "appid": "wx5717d133a901fb98",
   "projectname": "slap-hand-game",
   "condition": {},
   "simulatorPluginLibVersion": {},

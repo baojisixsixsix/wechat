@@ -35,6 +35,7 @@ const state = {
   actionStart: 0,
   leftCount: 0,
   rightCount: 0,
+  faceShrinkLevel: 0,
   energyScore: 0,
   lastEnergyDirection: null,
   lastEnergyGain: 0,
@@ -55,6 +56,10 @@ const state = {
   loginButtons: {},
   loginNotice: "",
   loginNoticeAt: 0,
+  rankBackButton: null,
+  rankRequestedAt: 0,
+  rankMessage: "",
+  openDataContext: null,
   restartButton: null,
   pauseButton: null,
   returnButton: null,
@@ -66,8 +71,13 @@ const state = {
 
 const ACTION_DURATION = 760;
 const ENERGY_MAX = 333;
+const RANK_KEY = "slap_best_time_seconds";
+const LOCAL_BEST_KEY = "slap_best_time_local";
+const RANK_CANVAS_WIDTH = 560;
+const RANK_CANVAS_HEIGHT = 900;
 const HAND_GROW_HITS = 33;
-const HAND_GROW_RATE = 0.1;
+const HAND_GROW_RATE = 0.15;
+const FACE_SHRINK_RATE = 0.05;
 const CHARGED_WAIT_DURATION = 2000;
 const CHARGED_WINDUP_DURATION = 1000;
 const POWER_FACE_DURATION = 2200;
@@ -95,8 +105,18 @@ function getEnergyGain(direction) {
   return state.lastEnergyDirection && state.lastEnergyDirection !== direction ? 3 : 1;
 }
 
+function isStrictComboEnergyRound() {
+  return state.energyClearCount === GAME_OVER_ENERGY_CLEARS - 1;
+}
+
 function addEnergy(direction) {
   if (state.gameEnded || state.chargedStrike || state.powerHitUntil > Date.now()) {
+    return 0;
+  }
+
+  if (isStrictComboEnergyRound() && state.energyScore > 0 && state.lastEnergyDirection === direction) {
+    resetEnergy();
+    state.lastEnergyGainAt = Date.now();
     return 0;
   }
 
@@ -125,6 +145,7 @@ function resetSinglePlayerGame() {
   state.actionStart = 0;
   state.leftCount = 0;
   state.rightCount = 0;
+  state.faceShrinkLevel = 0;
   state.chargedStrike = null;
   state.powerHitUntil = 0;
   state.powerHitAt = 0;
@@ -207,6 +228,7 @@ function endGame(now) {
   state.gameEnded = true;
   state.gameEndedAt = now;
   state.finalSeconds = Math.max(0, Math.ceil((now - state.gameStartedAt) / 1000));
+  submitBestTime();
   state.face = "faceGameOver";
   state.action = null;
   state.chargedStrike = null;
@@ -216,9 +238,82 @@ function endGame(now) {
   state.message = "别打了，别打了";
 }
 
+function getOpenDataContextSafe() {
+  if (!wx.getOpenDataContext) {
+    return null;
+  }
+  if (!state.openDataContext) {
+    state.openDataContext = wx.getOpenDataContext();
+  }
+  return state.openDataContext;
+}
+
+function getLocalBestTime() {
+  let localBest = 0;
+  try {
+    localBest = Number(wx.getStorageSync(LOCAL_BEST_KEY)) || 0;
+  } catch (error) {
+    localBest = 0;
+  }
+  return localBest;
+}
+
+function saveLocalBestTime(seconds) {
+  try {
+    wx.setStorageSync(LOCAL_BEST_KEY, seconds);
+  } catch (error) {
+    // Local storage failure should not block cloud score upload.
+  }
+}
+
+function syncBestTimeToCloud(seconds, complete) {
+  if (!wx.setUserCloudStorage || seconds <= 0) {
+    if (complete) complete();
+    return;
+  }
+
+  wx.setUserCloudStorage({
+    KVDataList: [
+      {
+        key: RANK_KEY,
+        value: String(seconds)
+      }
+    ],
+    success() {
+      state.rankMessage = "成绩已同步到好友排行";
+      if (complete) complete();
+    },
+    fail() {
+      state.rankMessage = "成绩同步失败，请稍后重试";
+      if (complete) complete();
+    }
+  });
+}
+
+function submitBestTime() {
+  if (state.finalSeconds <= 0) {
+    return;
+  }
+
+  const localBest = getLocalBestTime();
+  const bestSeconds = localBest > 0 ? Math.min(localBest, state.finalSeconds) : state.finalSeconds;
+  if (localBest !== bestSeconds) {
+    saveLocalBestTime(bestSeconds);
+  }
+  syncBestTimeToCloud(bestSeconds);
+}
+
 function getHandScale(direction) {
   const count = direction === "left" ? state.leftCount : state.rightCount;
   return 1 + Math.floor(count / HAND_GROW_HITS) * HAND_GROW_RATE;
+}
+
+function updateFaceShrinkLevel() {
+  state.faceShrinkLevel = Math.floor(getTotalHits() / HAND_GROW_HITS);
+}
+
+function getFaceScale() {
+  return Math.max(0.45, 1 - state.faceShrinkLevel * FACE_SHRINK_RATE);
 }
 
 function getLargestHandDirection() {
@@ -648,6 +743,7 @@ function drawLoginScreen(now) {
   drawLoginEntry("duel", "双人对线", state.width * 0.28, state.height * 0.48, -0.18, "#60a5fa");
   drawLoginEntry("fight", "双人格斗", state.width * 0.72, state.height * 0.48, 0.18, "#fb7185");
   drawLoginEntry("single", "3巴掌", state.width / 2, state.height * 0.8, -0.04, "#facc15");
+  drawLoginEntry("rank", "好友排行", state.width / 2, Math.min(state.height - 48, state.height * 0.91), 0.04, "#22c55e");
 
   if (state.loginNotice && now - state.loginNoticeAt < 980) {
     const age = now - state.loginNoticeAt;
@@ -656,6 +752,110 @@ function drawLoginScreen(now) {
     drawLoginComicText(state.loginNotice, state.width / 2, state.height * 0.62 - age * 0.03, 24, "#ffffff", 0);
     ctx.restore();
   }
+}
+
+function requestFriendRank() {
+  const openDataContext = getOpenDataContextSafe();
+  state.rankRequestedAt = Date.now();
+  if (!openDataContext || !openDataContext.postMessage) {
+    state.rankMessage = "当前环境不支持好友排行";
+    return;
+  }
+
+  state.rankMessage = "";
+  const postRankRequest = () => openDataContext.postMessage({
+    type: "showFriendRank",
+    key: RANK_KEY,
+    selfSeconds: getLocalBestTime(),
+    width: RANK_CANVAS_WIDTH,
+    height: RANK_CANVAS_HEIGHT
+  });
+
+  const localBest = getLocalBestTime();
+  if (localBest > 0) {
+    syncBestTimeToCloud(localBest, postRankRequest);
+  } else {
+    postRankRequest();
+  }
+}
+
+function enterRankScreen() {
+  state.screen = "rank";
+  state.gameEnded = false;
+  state.paused = false;
+  requestFriendRank();
+}
+
+function leaveRankScreen() {
+  const openDataContext = getOpenDataContextSafe();
+  if (openDataContext && openDataContext.postMessage) {
+    openDataContext.postMessage({
+      type: "hideFriendRank"
+    });
+  }
+  state.screen = "login";
+}
+
+function drawRankScreen(now) {
+  drawImageCover(images.faceNormal, 0, 0, state.width, state.height);
+  ctx.fillStyle = "rgba(0,0,0,0.52)";
+  ctx.fillRect(0, 0, state.width, state.height);
+
+  drawLoginComicText("好友排行", state.width / 2, Math.max(state.safeTop + 48, 64), 34, "#facc15", 0);
+
+  const sideGap = Math.max(42, Math.floor(state.width * 0.14));
+  const panelW = Math.max(236, state.width - sideGap * 2);
+  const panelX = (state.width - panelW) / 2;
+  const panelY = Math.max(state.safeTop + 92, 88);
+  const buttonH = 48;
+  const bottomGap = Math.max(24, Math.floor(state.height * 0.04));
+  const buttonY = state.height - bottomGap - buttonH / 2;
+  const panelH = Math.max(360, buttonY - buttonH / 2 - panelY - 18);
+
+  const openDataContext = getOpenDataContextSafe();
+  const sharedCanvas = openDataContext && openDataContext.canvas;
+  if (sharedCanvas) {
+    sharedCanvas.width = RANK_CANVAS_WIDTH;
+    sharedCanvas.height = RANK_CANVAS_HEIGHT;
+    ctx.drawImage(sharedCanvas, 0, 0, RANK_CANVAS_WIDTH, RANK_CANVAS_HEIGHT, panelX, panelY, panelW, panelH);
+  } else {
+    ctx.save();
+    ctx.fillStyle = "rgba(17,24,39,0.9)";
+    ctx.fillRect(panelX, panelY, panelW, panelH);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "800 18px sans-serif";
+    ctx.fillText(state.rankMessage || "需要微信小游戏环境读取好友排行", state.width / 2, panelY + panelH / 2);
+    ctx.restore();
+  }
+
+  if (state.rankMessage && now - state.rankRequestedAt < 1800) {
+    ctx.save();
+    ctx.globalAlpha = 1 - (now - state.rankRequestedAt) / 1800;
+    drawLoginComicText(state.rankMessage, state.width / 2, Math.min(buttonY - 34, panelY + panelH + 24), 20, "#ffffff", 0);
+    ctx.restore();
+  }
+
+  const localBest = getLocalBestTime();
+  if (localBest > 0) {
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "rgba(255,255,255,0.9)";
+    ctx.font = "800 15px sans-serif";
+    ctx.fillText(`我的最快：${localBest}秒`, state.width / 2, buttonY - 36);
+    ctx.restore();
+  }
+
+  const buttonW = 132;
+  state.rankBackButton = {
+    x: state.width / 2 - buttonW / 2,
+    y: buttonY - buttonH / 2,
+    width: buttonW,
+    height: buttonH
+  };
+  drawComicButton("返回", state.rankBackButton.x, state.rankBackButton.y, buttonW, buttonH, "#fb7185", 0.02);
 }
 
 function drawEnergyBar(now) {
@@ -768,9 +968,13 @@ function getActionProgress(now) {
 }
 
 function drawFace(now) {
-  const side = Math.min(state.width * 0.88, state.height * 0.52, 360);
+  const baseSide = Math.min(state.width * 0.88, state.height * 0.48, 350);
+  const side = baseSide * getFaceScale();
   const x = (state.width - side) / 2;
-  const y = Math.max(84, state.height * 0.12);
+  const topLimit = Math.max(134, state.safeTop + 112);
+  const centeredY = state.height * 0.5 - side * 0.55;
+  const bottomLimit = state.height - side - Math.min(168, state.width * 0.42);
+  const y = Math.max(topLimit, Math.min(centeredY, bottomLimit));
   const progress = getActionProgress(now);
   const push = state.action === "left" ? 1 : state.action === "right" ? -1 : 0;
   const hitPulse = progress > 0.16 && progress < 0.46 ? 1 : 0;
@@ -793,7 +997,7 @@ function drawFace(now) {
   drawImageCover(images[state.face], -side / 2, -side * 0.55, side, side);
   ctx.restore();
 
-  return { x, y, side };
+  return { x, y, side, baseSide };
 }
 
 function drawHand(now, faceBox) {
@@ -811,7 +1015,7 @@ function drawHand(now, faceBox) {
   }
 
   const handImage = state.action === "left" ? images.handPalm : images.handBack;
-  const handSide = faceBox.side * 0.62 * getHandScale(state.action);
+  const handSide = faceBox.baseSide * 0.62 * getHandScale(state.action);
   const fromLeft = state.action === "left";
   const startX = fromLeft ? -handSide : state.width;
   const hitX = fromLeft ? faceBox.x + faceBox.side * 0.06 : faceBox.x + faceBox.side * 0.54;
@@ -872,7 +1076,7 @@ function drawChargedStrike(now, faceBox) {
   const impactProgress = Math.min(Math.max((elapsed - CHARGED_WINDUP_DURATION) / 260, 0), 1);
   const baseScale = Math.max(getHandScale(direction), 1.25);
   const handImage = fromLeft ? images.handPalm : images.handBack;
-  const handSide = faceBox.side * 0.76 * baseScale * (1.08 + windupProgress * 0.18);
+  const handSide = faceBox.baseSide * 0.76 * baseScale * (1.08 + windupProgress * 0.18);
   const tremble = elapsed < CHARGED_WINDUP_DURATION
     ? Math.sin(now * 0.12) * (4 + windupProgress * 14)
     : Math.sin(now * 0.22) * 4 * (1 - impactProgress);
@@ -1126,6 +1330,8 @@ function render() {
     drawLoading();
   } else if (state.screen === "login") {
     drawLoginScreen(now);
+  } else if (state.screen === "rank") {
+    drawRankScreen(now);
   } else if (state.gameEnded) {
     drawGameOver(now);
   } else {
@@ -1161,6 +1367,11 @@ function enterSinglePlayer() {
 
 function handleLoginTouch(point) {
   startBgm();
+  if (pointInRect(point, state.loginButtons.rank)) {
+    enterRankScreen();
+    return;
+  }
+
   if (pointInRect(point, state.loginButtons.single)) {
     enterSinglePlayer();
     return;
@@ -1175,6 +1386,12 @@ function handleLoginTouch(point) {
   if (pointInRect(point, state.loginButtons.fight)) {
     state.loginNotice = "双人格斗暂未开放";
     state.loginNoticeAt = Date.now();
+  }
+}
+
+function handleRankTouch(point) {
+  if (pointInRect(point, state.rankBackButton)) {
+    leaveRankScreen();
   }
 }
 
@@ -1258,6 +1475,7 @@ function playSlap(direction, options = {}) {
   } else {
     state.rightCount += 1;
   }
+  updateFaceShrinkLevel();
 }
 
 function bindTouch() {
@@ -1270,6 +1488,11 @@ function bindTouch() {
     const point = { x: touch.clientX, y: touch.clientY };
     if (state.screen === "login") {
       handleLoginTouch(point);
+      return;
+    }
+
+    if (state.screen === "rank") {
+      handleRankTouch(point);
       return;
     }
 
